@@ -221,7 +221,7 @@ static void send_keyboard_report(uint8_t keycode, bool pressed)
                    report, sizeof(report));
 }
 
-#define FILTER_SHIFT   3   // 1/8  smoothing (~200ms)a
+#define FILTER_SHIFT   3   // 1/8  smoothing method (~200ms)a
 #define BASE_SHIFT     9   // 1/512 baseline (~15s)
 #define SLOPE_TH      2   // slope trigger threshold
 #define DEADZONE       2   // ignore tiny noise

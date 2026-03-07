@@ -39,6 +39,7 @@ bool is_connected = false;
 
 int64_t connected_time = 0;
 /* GPIO ports */
+// GPIO0 is used for the side button and LED3
 #define GPIO0_NODE DT_NODELABEL(gpio0)
 #define GPIO1_NODE DT_NODELABEL(gpio1)
 
