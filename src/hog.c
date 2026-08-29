@@ -30,6 +30,7 @@ extern bool is_right_board;
 extern bool is_connected;
 extern int16_t adc_buffer;
 extern struct bt_conn *current_conn;
+extern bool nus_ready;   /* set in main.c when the NUS console subscribes */
 
 /*
  * ============================================================
@@ -61,9 +62,14 @@ extern struct bt_conn *current_conn;
  * but does NOT continuously adapt during a held touch.
  */
 
-#define SETUP_WINDOW          150
-#define MEDIAN_WINDOW         3
-#define MEAN_WINDOW           3
+/*
+ * Sample-count constants below are scaled for SAMPLE_PERIOD_MS = 8.
+ * They were originally tuned at 30 ms, so each was multiplied by 30/8 = 3.75
+ * to preserve the same behaviour in wall-clock time.
+ */
+#define SETUP_WINDOW          562  /* 562 * 8 ms = 4.5 s, was 150 * 30 ms */
+#define MEDIAN_WINDOW         11   /* was 3, same filter time constant */
+#define MEAN_WINDOW           11   /* was 3 */
 
 #define ON_FRACTION_NUM       38
 #define OFF_FRACTION_NUM      60
@@ -72,8 +78,8 @@ extern struct bt_conn *current_conn;
 #define MIN_ON_OFFSET_MV      8
 #define MIN_OFF_OFFSET_MV     4
 
-#define ON_DEBOUNCE_COUNT     2
-#define OFF_DEBOUNCE_COUNT    2
+#define ON_DEBOUNCE_COUNT     8    /* 8 * 8 ms = 64 ms, was 2 * 30 ms = 60 ms */
+#define OFF_DEBOUNCE_COUNT    8
 
 /*
  * First rising spike detector.
@@ -81,7 +87,24 @@ extern struct bt_conn *current_conn;
  * If setup does not start reliably, lower this.
  * If setup starts from noise, raise this.
  */
-#define START_SPIKE_DELTA_MV  8
+/*
+ * First rising spike detector.
+ *
+ * The delta is measured over a FIXED TIME WINDOW, not between consecutive
+ * samples, so the threshold no longer depends on the sampling rate. The
+ * original tuning was 8 mV between samples 30 ms apart; SPIKE_LOOKBACK_SAMPLES
+ * reproduces that window at any SAMPLE_PERIOD_MS.
+ *
+ * Comparing adjacent samples instead would make the threshold scale inversely
+ * with sample rate, which at 8 ms drove it down to ~2 mV - close enough to the
+ * noise floor that setup triggered instantly on noise every time.
+ *
+ * If setup does not start reliably, lower START_SPIKE_DELTA_MV.
+ * If setup starts from noise, raise it.
+ */
+#define SPIKE_LOOKBACK_SAMPLES 4   /* 4 * 8 ms = 32 ms, was 1 * 30 ms */
+#define SPIKE_LOOKBACK_MS      32  /* keep = SPIKE_LOOKBACK_SAMPLES * SAMPLE_PERIOD_MS */
+#define START_SPIKE_DELTA_MV   8   /* mV across that window, as originally tuned */
 
 /*
  * Set to 1 if you want algorithm prints over RTT.
@@ -97,8 +120,9 @@ extern struct bt_conn *current_conn;
  * 10-bit ADC max count = 1023
  */
 
+#define ADC_RESOLUTION_BITS   12
 #define ADC_FULL_SCALE_MV     3600
-#define ADC_MAX_COUNTS        1023
+#define ADC_MAX_COUNTS        (1 << ADC_RESOLUTION_BITS)  /* 4096, not 4095 */
 
 /*
  * ============================================================
@@ -220,8 +244,10 @@ static bool collecting_setup;
 static bool threshold_locked;
 
 /* Rising spike detection */
-static int32_t prev_filtered_mv;
-static bool have_prev_filtered;
+/* Ring of recent filtered values, so the spike delta spans a fixed time. */
+static int32_t spike_hist_mv[SPIKE_LOOKBACK_SAMPLES];
+static uint8_t spike_hist_index;
+static uint8_t spike_hist_count;
 
 /* Detector values */
 static int32_t filtered_mv;
@@ -420,7 +446,10 @@ static int32_t percentile_from_array(const int32_t *data,
 				     uint16_t count,
 				     uint8_t percent)
 {
-	int32_t temp[SETUP_WINDOW];
+	/* static, not a local: SETUP_WINDOW * 4 = 2248 bytes would overflow the
+	 * main thread stack. Safe because only the main thread calls this.
+	 */
+	static int32_t temp[SETUP_WINDOW];
 	uint16_t idx;
 
 	if (count == 0) {
@@ -525,8 +554,9 @@ void hog_reset_detector(void)
 	collecting_setup = false;
 	threshold_locked = false;
 
-	prev_filtered_mv = 0;
-	have_prev_filtered = false;
+	memset(spike_hist_mv, 0, sizeof(spike_hist_mv));
+	spike_hist_index = 0;
+	spike_hist_count = 0;
 
 	filtered_mv = 0;
 	baseline_mv = 0;
@@ -584,10 +614,19 @@ void hog_button_loop(void)
 	uint8_t keycode;
 
 	/*
-	 * Do not process or send anything until connected and notifications
-	 * are enabled by the host.
+	 * Run the detector when the host has subscribed to EITHER the HID
+	 * input report or the NUS console. The console-only case lets the
+	 * calibration sequence run while debugging from nRF Connect, where
+	 * the phone is not acting as a keyboard.
+	 *
+	 * send_keyboard_report() still gates on notifications_enabled, so no
+	 * HID traffic is generated for a console-only subscriber.
 	 */
-	if (!is_connected || !notifications_enabled || current_conn == NULL) {
+	if (!is_connected || current_conn == NULL) {
+		return;
+	}
+
+	if (!notifications_enabled && !nus_ready) {
 		return;
 	}
 
@@ -616,9 +655,12 @@ void hog_button_loop(void)
 	 */
 	if (!threshold_locked) {
 		if (!collecting_setup) {
-			if (!have_prev_filtered) {
-				prev_filtered_mv = filtered_mv;
-				have_prev_filtered = true;
+			/* Fill the lookback ring before any comparison is valid. */
+			if (spike_hist_count < SPIKE_LOOKBACK_SAMPLES) {
+				spike_hist_mv[spike_hist_index] = filtered_mv;
+				spike_hist_index = (spike_hist_index + 1) %
+						   SPIKE_LOOKBACK_SAMPLES;
+				spike_hist_count++;
 
 #if DEBUG_ALGORITHM_PRINTS
 				printk("Waiting for first spike: filt=%d\n", filtered_mv);
@@ -626,7 +668,8 @@ void hog_button_loop(void)
 				return;
 			}
 
-			delta_mv = filtered_mv - prev_filtered_mv;
+			/* Oldest sample sits at the write index. */
+			delta_mv = filtered_mv - spike_hist_mv[spike_hist_index];
 
 			if (delta_mv >= START_SPIKE_DELTA_MV) {
 				spike_detected = true;
@@ -635,14 +678,17 @@ void hog_button_loop(void)
 
 				setup_samples[setup_count++] = filtered_mv;
 
-				printk("First rising spike detected: prev=%d current=%d delta=%d\n",
-				       prev_filtered_mv,
+				printk("First rising spike detected: was=%d now=%d delta=%d over %u ms\n",
+				       spike_hist_mv[spike_hist_index],
 				       filtered_mv,
-				       delta_mv);
+				       delta_mv,
+				       SPIKE_LOOKBACK_MS);
 			}
 
-			prev_filtered_mv = filtered_mv;
-			have_prev_filtered = true;
+			/* Overwrite the oldest entry and advance. */
+			spike_hist_mv[spike_hist_index] = filtered_mv;
+			spike_hist_index = (spike_hist_index + 1) %
+					   SPIKE_LOOKBACK_SAMPLES;
 
 			return;
 		}
