@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -16,9 +17,16 @@ extern "C" {
 
 void hog_init(void);
 
-void hog_joystick_loop(int32_t vlog_mv);
+void hog_button_loop(void);
 
-#include <stdint.h>
+void hog_reset_detector(void);
+
+void hog_connected(void);
+void hog_disconnected(void);
+
+bool hog_is_waiting_for_rising_edge(void);
+bool hog_is_collecting_calibration(void);
+bool hog_threshold_is_locked(void);
 
 #ifdef __cplusplus
 }

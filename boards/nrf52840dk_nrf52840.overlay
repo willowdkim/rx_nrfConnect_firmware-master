@@ -23,7 +23,7 @@
     pinctrl-names = "default", "sleep";
 
     lsm6dsox: lsm6dsox@6a {
-        compatible = "st,lsm6dsox";
+        compatible = "st,lsm6dso";
         reg = <0x6a>;
     };
 };
