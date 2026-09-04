@@ -28,6 +28,11 @@ bool hog_is_waiting_for_rising_edge(void);
 bool hog_is_collecting_calibration(void);
 bool hog_threshold_is_locked(void);
 
+/* Calibrated values, valid once hog_threshold_is_locked() is true. */
+int32_t hog_baseline_mv(void);
+int32_t hog_on_threshold_mv(void);
+int32_t hog_off_threshold_mv(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -9,6 +9,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/settings/settings.h>
 
 #include <zephyr/device.h>
@@ -72,12 +73,26 @@
 #define ADC_FULL_SCALE_MV 3600
 #define ADC_MAX_COUNTS    (1 << ADC_RESOLUTION)
 
-/* How often to push a reading to the nRF Connect UART console, in ms.
- * Deliberately NOT tied to SAMPLE_PERIOD_MS: the detector needs fast
- * sampling, but BLE cannot carry a notification every 8 ms and no human
- * can read 125 lines/sec anyway.
+/* ---------------- Rev2 / Rev3 comparison instrumentation ----------------
+ *
+ * TWO capture paths, and they are NOT equivalent measurements:
+ *
+ *   BLE (nus_stream_sample)  battery powered, floating ground. This is the
+ *                            representative condition and the primary dataset.
+ *   RTT (VLOG_RTT_STREAM)    requires J-Link attached, which ties board ground
+ *                            to the PC and hence to mains earth. In a
+ *                            body-coupled system the body-to-earth return path
+ *                            IS the signal path, so the probe changes the
+ *                            measurement. Use for debugging, and for
+ *                            quantifying the grounding effect by capturing
+ *                            both ways - not as the sole dataset.
+ *
+ * RTT line format:  VLOG,<uptime_ms>,<raw_counts>
+ *
+ * Raw counts, not millivolts: conversion is lossy and belongs in analysis,
+ * where it can use a per-board calibration factor.
  */
-#define NUS_REPORT_MS 50
+#define VLOG_RTT_STREAM 1
 
 
 static const struct device *adc_dev = DEVICE_DT_GET(ADC_NODE);
@@ -141,6 +156,9 @@ static const struct bt_data ad[] = {
  */
 bool nus_ready;
 
+/* Last detector state announced over NUS; 0xFF forces a re-send. */
+uint8_t nus_last_state = 0xFFU;
+
 static int32_t raw_adc_to_mv(int16_t raw)
 {
     if (raw < 0) {
@@ -163,6 +181,10 @@ static void nus_send_enabled(enum bt_nus_send_status status)
 {
     nus_ready = (status == BT_NUS_SEND_STATUS_ENABLED);
     printk("NUS notifications %s\n", nus_ready ? "enabled" : "disabled");
+
+    /* Force the loop to re-announce detector state to the new subscriber. */
+    extern uint8_t nus_last_state;
+    nus_last_state = 0xFFU;
 }
 
 static struct bt_nus_cb nus_cb = {
@@ -170,47 +192,129 @@ static struct bt_nus_cb nus_cb = {
     .send_enabled = nus_send_enabled,
 };
 
-static void nus_report_voltage(int64_t now_ms, int64_t *last_report_ms)
-{
-    char line[24];
-    int  len;
-    int  err;
+/* Batched binary stream: 6 samples per notification, 18 bytes, which fits the
+ * default 20-byte ATT payload with no MTU negotiation required. 125 Hz / 6 =
+ * ~21 packets/s, comfortably inside what iOS grants at a 30 ms connection
+ * interval - so the wireless capture runs at the FULL sample rate.
+ *
+ * This matters because RTT is not a neutral observer: the J-Link ties board
+ * ground to the PC and therefore to mains earth, and in a body-coupled system
+ * the body-to-earth return path IS the signal path. Battery-powered BLE is the
+ * representative measurement condition; RTT is the perturbed one.
+ *
+ * Packet layout (little endian):
+ *   [0..3] uint32 uptime_ms of the FIRST sample in the batch
+ *   [4..5] uint16 packet sequence, wraps at 65536
+ *   [6..]  6 x uint16 raw SAADC counts, spaced SAMPLE_PERIOD_MS apart
+ */
+#define NUS_BATCH_SAMPLES 6
+#define NUS_PACKET_BYTES  (6 + 2 * NUS_BATCH_SAMPLES)
 
+static void nus_stream_sample(int64_t now_ms, int16_t raw)
+{
+    static uint16_t batch[NUS_BATCH_SAMPLES];
+    static uint8_t  batch_n;
+    static uint32_t batch_t0;
+    static uint16_t batch_seq;
+    static uint32_t dropped;
+    static int64_t  last_warn_ms;
+
+    if (!nus_ready || current_conn == NULL) {
+        batch_n = 0;
+        return;
+    }
+
+    if (batch_n == 0) {
+        batch_t0 = (uint32_t)now_ms;
+    }
+
+    batch[batch_n++] = (uint16_t)(raw < 0 ? 0 : raw);
+
+    if (batch_n < NUS_BATCH_SAMPLES) {
+        return;
+    }
+
+    uint8_t pkt[NUS_PACKET_BYTES];
+
+    sys_put_le32(batch_t0, &pkt[0]);
+    sys_put_le16(batch_seq++, &pkt[4]);
+    for (uint8_t i = 0; i < NUS_BATCH_SAMPLES; i++) {
+        sys_put_le16(batch[i], &pkt[6 + 2 * i]);
+    }
+    batch_n = 0;
+
+    int err = bt_nus_send(current_conn, pkt, sizeof(pkt));
+    if (err) {
+        /* Count drops, report once a second. Printing every failure floods RTT
+         * and stalls the loop, which corrupts the sample timing.
+         */
+        dropped++;
+        if ((now_ms - last_warn_ms) >= 1000) {
+            last_warn_ms = now_ms;
+            printk("bt_nus_send: %u packets dropped in last 1s (err %d)\n",
+                   dropped, err);
+            dropped = 0;
+        }
+    }
+}
+
+/* Detector decisions over the same NUS stream, so a battery-powered capture
+ * carries them without needing HID pairing on the host.
+ *
+ * 6 bytes, distinguishable from the 18-byte sample packet by length:
+ *   [0..3] uint32 uptime_ms
+ *   [4]    0x4B ('K')
+ *   [5]    1 = key down, 0 = key up
+ */
+/* Detector state, so the host knows when calibration is finished instead of
+ * relying on someone watching the LEDs:
+ *   0 = waiting for the first rising spike
+ *   1 = collecting calibration samples
+ *   2 = threshold locked, detector armed
+ */
+#define NUS_TAG_KEY   0x4B
+#define NUS_TAG_STATE 0x53
+
+void nus_send_state(uint8_t state)
+{
     if (!nus_ready || current_conn == NULL) {
         return;
     }
 
-    if ((now_ms - *last_report_ms) < NUS_REPORT_MS) {
+    /* 12 bytes. The thresholds only exist on the board, so they have to ride
+     * along with the state or the host can never display them:
+     *   [0..3]  uint32 uptime_ms
+     *   [4]     0x53 'S'
+     *   [5]     state
+     *   [6..7]  int16 baseline mV      (0 until locked)
+     *   [8..9]  int16 on-threshold mV
+     *   [10..11] int16 off-threshold mV
+     */
+    uint8_t pkt[12];
+
+    sys_put_le32((uint32_t)k_uptime_get(), &pkt[0]);
+    pkt[4] = NUS_TAG_STATE;
+    pkt[5] = state;
+    sys_put_le16((uint16_t)(int16_t)hog_baseline_mv(), &pkt[6]);
+    sys_put_le16((uint16_t)(int16_t)hog_on_threshold_mv(), &pkt[8]);
+    sys_put_le16((uint16_t)(int16_t)hog_off_threshold_mv(), &pkt[10]);
+
+    (void)bt_nus_send(current_conn, pkt, sizeof(pkt));
+}
+
+void nus_send_key_event(bool down)
+{
+    if (!nus_ready || current_conn == NULL) {
         return;
     }
 
-    *last_report_ms = now_ms;
+    uint8_t pkt[6];
 
-    /* Max 17 chars, so it fits the default 20-byte ATT notification. */
-    len = snprintf(line, sizeof(line), "V=%dmV raw=%d\n",
-                   raw_adc_to_mv(adc_buffer), (int)adc_buffer);
+    sys_put_le32((uint32_t)k_uptime_get(), &pkt[0]);
+    pkt[4] = NUS_TAG_KEY;
+    pkt[5] = down ? 1U : 0U;
 
-    if (len <= 0) {
-        return;
-    }
-
-    err = bt_nus_send(current_conn, (const uint8_t *)line, (uint16_t)len);
-    if (err) {
-        /* The link cannot always accept a packet. Count drops and report at
-         * most once a second: printing every failure floods RTT and stalls
-         * the main loop, which wrecks LED blink and sampling timing.
-         */
-        static uint32_t dropped;
-        static int64_t last_warn_ms;
-
-        dropped++;
-
-        if ((now_ms - last_warn_ms) >= 1000) {
-            last_warn_ms = now_ms;
-            printk("bt_nus_send: %u drops in last 1s (err %d)\n", dropped, err);
-            dropped = 0;
-        }
-    }
+    (void)bt_nus_send(current_conn, pkt, sizeof(pkt));
 }
 
 static void build_device_name(void)
@@ -518,7 +622,6 @@ static void update_status_leds(int64_t now_ms)
 int main(void)
 {
     int err;
-    int64_t last_nus_ms = 0;
 
     build_device_name();
 
@@ -557,12 +660,17 @@ int main(void)
 
         err = adc_read(adc_dev, &sequence);
         if (!err) {
+#if VLOG_RTT_STREAM
+            /* One line per sample, before any filtering. */
+            printk("VLOG,%u,%d\n", (uint32_t)now_ms, (int)adc_buffer);
+#endif
+
             hog_button_loop();
 
             /* Independent of hog_button_loop(), which bails out unless
              * HID notifications are subscribed.
              */
-            nus_report_voltage(now_ms, &last_nus_ms);
+            nus_stream_sample(now_ms, adc_buffer);
         } else {
             printk("ADC read failed: %d\n", err);
         }
@@ -570,6 +678,16 @@ int main(void)
         read_and_print_imu();
 
         update_status_leds(now_ms);
+
+        /* Announce detector state transitions to the host. */
+        uint8_t st = hog_threshold_is_locked() ? 2U
+                   : hog_is_collecting_calibration() ? 1U : 0U;
+
+        if (st != nus_last_state) {
+            nus_last_state = st;
+            nus_send_state(st);
+            printk("STATE,%u,%u\n", (uint32_t)now_ms, st);
+        }
 
         k_sleep(K_MSEC(SAMPLE_PERIOD_MS));
     }
