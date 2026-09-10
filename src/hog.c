@@ -31,6 +31,7 @@ extern bool is_connected;
 extern int16_t adc_buffer;
 extern struct bt_conn *current_conn;
 extern bool nus_ready;   /* set in main.c when the NUS console subscribes */
+extern void nus_send_key_event(bool down);   /* main.c: detector event over NUS */
 
 /*
  * ============================================================
@@ -753,6 +754,11 @@ void hog_button_loop(void)
 
 			send_keyboard_report(keycode, true);
 
+			/* Machine-readable, same clock as the VLOG stream, so
+			 * detections and signal share one time axis.
+			 */
+			nus_send_key_event(true);
+			printk("KEY,%u,1\n", (uint32_t)k_uptime_get());
 			printk("KEY DOWN: %s\n", is_right_board ? "D" : "A");
 		}
 	} else {
@@ -771,6 +777,8 @@ void hog_button_loop(void)
 
 			send_keyboard_report(keycode, false);
 
+			nus_send_key_event(false);
+			printk("KEY,%u,0\n", (uint32_t)k_uptime_get());
 			printk("KEY UP: %s\n", is_right_board ? "D" : "A");
 		}
 	}
@@ -795,4 +803,19 @@ bool hog_is_collecting_calibration(void)
 bool hog_threshold_is_locked(void)
 {
 	return threshold_locked;
+}
+
+int32_t hog_baseline_mv(void)
+{
+	return baseline_mv;
+}
+
+int32_t hog_on_threshold_mv(void)
+{
+	return on_threshold_mv;
+}
+
+int32_t hog_off_threshold_mv(void)
+{
+	return off_threshold_mv;
 }
