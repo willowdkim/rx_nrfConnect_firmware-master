@@ -165,6 +165,7 @@ def main():
         ax.spines[side].set_color(MUTED)
     ax.tick_params(colors=MUTED, labelcolor=INK)
     ax.set_xlim(lo, hi)
+    ax.set_ylim(400, 1400)
 
     if not args.no_events and (keys or marks):
         from matplotlib.patches import Patch
