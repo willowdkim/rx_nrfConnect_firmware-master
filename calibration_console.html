@@ -1,0 +1,746 @@
+<title>Circle Calibration Console</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: one connect action up top, then a live card per wearable showing
+   its reading against the calibrated threshold. Actions sit under the cards,
+   within thumb reach on a tablet held in two hands. */
+:root {
+  --bg:        #f2f3f5;
+  --surface:   #ffffff;
+  --surface-2: #e8eaee;
+  --line:      #d2d6dd;
+  --fg:        #15181d;
+  --fg-dim:    #5c6472;
+  --accent:    #2a6ed6;
+  --ready:     #1c7a53;
+  --touch:     #1c7a53;
+  --calib:     #b06a00;
+  --idle:      #6b7280;
+  --fault:     #c0392b;
+  --font-ui:   "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15171c; --surface: #1d2027; --surface-2: #272b34; --line: #363b46;
+    --fg: #eef0f4; --fg-dim: #99a1b0; --accent: #6ea8f5; --ready: #4cc08b;
+    --touch: #4cc08b; --calib: #e0a040; --idle: #7d8696; --fault: #f0736a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15171c; --surface: #1d2027; --surface-2: #272b34; --line: #363b46;
+  --fg: #eef0f4; --fg-dim: #99a1b0; --accent: #6ea8f5; --ready: #4cc08b;
+  --touch: #4cc08b; --calib: #e0a040; --idle: #7d8696; --fault: #f0736a;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-ui);
+  font-size: 16px; line-height: 1.5;
+  padding-inline: 16px; padding-block: 20px 36px;
+  max-width: 700px; margin-inline: auto;
+}
+header { margin-bottom: 18px; }
+h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 2px; text-wrap: balance; }
+.sub { color: var(--fg-dim); font-size: .875rem; margin: 0; }
+h2 { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+     color: var(--fg-dim); font-weight: 600; margin: 0 0 10px; }
+
+.panel { background: var(--surface); border: 1px solid var(--line);
+         border-radius: 10px; padding: 16px; }
+
+/* ---- wearable cards ---- */
+.units { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+@media (max-width: 520px) { .units { grid-template-columns: 1fr; } }
+
+.unit { background: var(--surface); border: 1px solid var(--line);
+        border-radius: 10px; padding: 14px; min-width: 0;
+        display: flex; flex-direction: column; gap: 11px; }
+.unit.empty { border-style: dashed; opacity: .6; }
+.unit.touching { border-color: var(--touch); }
+
+.uhead { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.uname { font-weight: 600; font-size: 1rem; }
+.udev { font-family: var(--font-mono); font-size: .68rem; color: var(--fg-dim);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* the big answer */
+.verdict { font-family: var(--font-mono); font-size: 1.9rem; font-weight: 600;
+           line-height: 1.15; margin: 0; color: var(--fg-dim); letter-spacing: .01em; }
+.unit.touching .verdict { color: var(--touch); }
+
+.state { display: flex; align-items: center; gap: 8px; font-size: .85rem; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--idle); flex: none; }
+.dot.ready { background: var(--ready); }
+.dot.calib { background: var(--calib); animation: pulse 1s ease-in-out infinite; }
+.dot.buffer{ background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .dot { animation: none !important; } }
+
+/* reading vs threshold */
+.meter { height: 8px; border-radius: 4px; background: var(--surface-2);
+         position: relative; overflow: hidden; }
+.meter .fill { position: absolute; inset: 0 auto 0 0; width: 0;
+               background: var(--accent); border-radius: 4px; transition: width .08s linear; }
+.unit.touching .meter .fill { background: var(--touch); }
+.meter .mark { position: absolute; top: -2px; bottom: -2px; width: 2px;
+               background: var(--fg); opacity: .55; }
+.nums { display: flex; justify-content: space-between; gap: 8px;
+        font-family: var(--font-mono); font-size: .75rem; color: var(--fg-dim);
+        font-variant-numeric: tabular-nums; }
+.nums b { color: var(--fg); font-weight: 600; }
+.nums .weak { color: var(--fault); }
+
+/* ---- buttons ---- */
+button { font-family: var(--font-ui); font-size: 1rem; font-weight: 500;
+  border-radius: 8px; border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--fg);
+  padding: 11px 14px; cursor: pointer; min-height: 48px; width: 100%; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+:root[data-theme="dark"] button.primary { color: #10131a; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) button.primary { color: #10131a; }
+}
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+@media (max-width: 520px) { .actions { grid-template-columns: 1fr; } }
+#btnConnect { margin-bottom: 14px; }
+
+.setup { margin-bottom: 14px; }
+.setup summary { font-size: .8rem; font-weight: 600; color: var(--fg-dim);
+                 cursor: pointer; letter-spacing: .02em; }
+.setup summary::marker { color: var(--fg-dim); }
+.setup-why { font-size: .825rem; color: var(--fg-dim); margin: 11px 0 0; }
+.reg { display: flex; flex-direction: column; gap: 9px; margin-top: 14px; }
+.regrow { display: grid; grid-template-columns: 3.5rem 1fr auto;
+          align-items: center; gap: 10px; }
+@media (max-width: 460px) { .regrow { grid-template-columns: 3.5rem 1fr; }
+                            .regrow button { grid-column: 1 / -1; } }
+.regname { font-weight: 600; font-size: .9rem; }
+.regstate { font-family: var(--font-mono); font-size: .75rem; color: var(--fg-dim); }
+.regstate.ok { color: var(--ready); }
+.regrow button { width: auto; min-width: 9.5rem; min-height: 42px; font-size: .875rem; }
+
+#log { font-family: var(--font-mono); font-size: .75rem; line-height: 1.6;
+  color: var(--fg-dim); background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; height: 124px;
+  overflow-y: auto; overflow-x: auto; white-space: pre; margin: 0; }
+#log b { color: var(--fg); font-weight: 500; }
+#log .err { color: var(--fault); }
+#steps { margin-bottom: 14px; }
+.stage-say { font-size: 1.15rem; font-weight: 600; line-height: 1.35;
+             margin: 0; text-wrap: balance; }
+.stage-sub { font-size: .875rem; color: var(--fg-dim); margin: 6px 0 0; }
+.stage.ready  .stage-say { color: var(--accent); }
+.stage.go     .stage-say { color: var(--calib); }
+.stage.done   .stage-say { color: var(--ready); }
+
+.count { margin-top: 14px; display: flex; align-items: center; gap: 14px; }
+.count-num { font-family: var(--font-mono); font-size: 2.6rem; font-weight: 600;
+             line-height: 1; color: var(--calib); font-variant-numeric: tabular-nums;
+             min-width: 2.2ch; text-align: center; }
+.count-bar { flex: 1; height: 10px; border-radius: 5px;
+             background: var(--surface-2); overflow: hidden; min-width: 0; }
+.count-fill { height: 100%; width: 100%; background: var(--calib);
+              border-radius: 5px; transition: width .1s linear; }
+.note { font-size: .8rem; color: var(--fg-dim); margin: 14px 0 0;
+        border-left: 2px solid var(--line); padding-left: 11px; }
+</style>
+
+<header>
+  <h1>Circle Calibration Console</h1>
+  <p class="sub">Recalibrate both wearables without power-cycling, then check them.</p>
+</header>
+
+<button id="btnConnect" class="primary">Connect wearables</button>
+
+<details class="panel setup" id="setup">
+  <summary>First-time setup on this iPad</summary>
+  <p class="setup-why">Each wearable must be granted to this page once, from this
+    browser. Pairing them to the iPad is not enough &mdash; that is a Bluetooth bond
+    between iPad and wearable, while this is a permission the browser holds for this
+    page. Grant it once and every session afterwards connects on its own.</p>
+  <p class="setup-why"><b>Do this with the wearables on and not yet in a game.</b>
+    Register one side at a time and pick the unit you are holding; the page checks
+    that the board agrees before accepting it.</p>
+  <div class="reg">
+    <div class="regrow">
+      <span class="regname">Left</span>
+      <span class="regstate" data-regstate="Left">not registered</span>
+      <button data-regbtn="Left">Register left</button>
+    </div>
+    <div class="regrow">
+      <span class="regname">Right</span>
+      <span class="regstate" data-regstate="Right">not registered</span>
+      <button data-regbtn="Right">Register right</button>
+    </div>
+  </div>
+</details>
+
+<div class="units">
+  <div class="unit empty" id="unitL">
+    <div class="uhead"><span class="uname">Left</span><span class="udev" data-dev>not connected</span></div>
+    <p class="verdict" data-verdict>—</p>
+    <div class="state"><span class="dot" data-dot></span><span data-state>Offline</span></div>
+    <div class="meter"><div class="fill" data-fill></div><div class="mark" data-mark hidden></div></div>
+    <div class="nums"><span data-mv>— mV</span><span data-thr>threshold —</span></div>
+  </div>
+  <div class="unit empty" id="unitR">
+    <div class="uhead"><span class="uname">Right</span><span class="udev" data-dev>not connected</span></div>
+    <p class="verdict" data-verdict>—</p>
+    <div class="state"><span class="dot" data-dot></span><span data-state>Offline</span></div>
+    <div class="meter"><div class="fill" data-fill></div><div class="mark" data-mark hidden></div></div>
+    <div class="nums"><span data-mv>— mV</span><span data-thr>threshold —</span></div>
+  </div>
+</div>
+
+<div class="actions">
+  <button id="btnTest" disabled>Test</button>
+  <button id="btnRecal" class="primary" disabled>Recalibrate both</button>
+</div>
+
+<div class="panel stage" id="steps" hidden>
+  <h2 id="stageLabel">Recalibrating</h2>
+  <p class="stage-say" id="stageSay">Starting&hellip;</p>
+  <p class="stage-sub" id="stageSub"></p>
+  <div class="count" id="countWrap" hidden>
+    <div class="count-num" id="countNum">5</div>
+    <div class="count-bar"><div class="count-fill" id="countFill"></div></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Activity</h2>
+  <pre id="log">Connect a wearable to begin.</pre>
+</div>
+
+<p class="note" id="support"></p>
+
+<script>
+"use strict";
+
+const NUS    = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";  /* host writes   */
+const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";  /* device notifies */
+
+const TAG_KEY = 0x4b, TAG_STATE = 0x53, TAG_TEST = 0x54;
+const ADC_FULL_SCALE_MV = 3600, ADC_MAX_COUNTS = 4096;
+
+/* The firmware's MIN_ON_OFFSET_MV floor is 8 mV. A calibration that lands at
+   or near it did not see a real touch/no-touch spread. Real captures put the
+   margin in the tens of mV, so 15 separates the two cases cleanly. */
+const MIN_USABLE_MARGIN_MV = 15;
+
+/* Detector states, worded to match the LED sequence on the wearable. */
+const STATES = {
+  0: { label: "Waiting for touch", cls: "buffer" },
+  1: { label: "Calibrating",       cls: "calib"  },
+  2: { label: "Ready",             cls: "ready"  },
+};
+
+const log = document.getElementById("log");
+let lines = [];
+function say(msg, isErr) {
+  const t = new Date().toLocaleTimeString([], { hour12: false });
+  lines.push(`<span class="${isErr ? "err" : ""}">${t}  ${msg}</span>`);
+  if (lines.length > 60) lines.shift();
+  log.innerHTML = lines.join("\n");
+  log.scrollTop = log.scrollHeight;
+}
+
+class Unit {
+  constructor(side, el) {
+    this.side = side;                 /* "Left" | "Right" */
+    this.el = el;
+    this.device = null; this.rx = null;
+    this.state = null; this.key = false;
+    this.mv = null; this.onThr = null; this.offThr = null; this.base = null;
+    this.q = {
+      dev:  el.querySelector("[data-dev]"),
+      ver:  el.querySelector("[data-verdict]"),
+      dot:  el.querySelector("[data-dot]"),
+      st:   el.querySelector("[data-state]"),
+      fill: el.querySelector("[data-fill]"),
+      mark: el.querySelector("[data-mark]"),
+      mvEl: el.querySelector("[data-mv]"),
+      thr:  el.querySelector("[data-thr]"),
+    };
+  }
+  get connected() { return !!(this.device && this.device.gatt.connected); }
+
+  attach(device, rx) {
+    this.device = device; this.rx = rx;
+    this.q.dev.textContent = device.name || device.id.slice(0, 10);
+  }
+
+  drop() {
+    if (!this.device) return;
+    say(`${this.side}: disconnected.`, true);
+    this.device = null; this.rx = null; this.state = null;
+    this.key = false; this.mv = null; this.onThr = null;
+    this.q.dev.textContent = "not connected";
+    render();
+  }
+
+  onPacket(view) {
+    const len = view.byteLength;
+    if (len === 6 && view.getUint8(4) === TAG_KEY) {
+      this.key = view.getUint8(5) === 1;
+    } else if (len === 13 && view.getUint8(4) === TAG_STATE) {
+      this.setState(view.getUint8(5));
+      this.base   = view.getInt16(6, true);
+      this.onThr  = view.getInt16(8, true);
+      this.offThr = view.getInt16(10, true);
+      if (this.state === 2) {
+        const margin = this.onThr - this.base;
+        say(`${this.side}: calibrated, threshold ${this.onThr} mV ` +
+            `(${margin} mV above baseline)`);
+        /* The firmware floors the on-offset at MIN_ON_OFFSET_MV (8 mV), so a
+           margin at or near that floor means the calibration window never saw
+           both states - almost always a bump that was held instead of
+           repeated. Catch it here rather than letting it fail mid-game. */
+        if (margin <= MIN_USABLE_MARGIN_MV) {
+          this.weak = true;
+          say(`${this.side}: that margin is too small to be reliable — ` +
+              `recalibrate, bumping and releasing about once a second.`, true);
+        } else {
+          this.weak = false;
+        }
+      }
+    } else if (len === 8 && view.getUint8(4) === TAG_TEST) {
+      this.key = view.getUint8(6) === 1;
+      this.setState(view.getUint8(7));
+    } else if (len === 18) {
+      /* Voltage batch: 6 raw samples. Only the newest is needed for a live
+         readout, so skip to the last one rather than decoding all six. */
+      const raw = view.getUint16(6 + 2 * 5, true);
+      this.mv = Math.round(raw * ADC_FULL_SCALE_MV / ADC_MAX_COUNTS);
+      /* Track the range actually seen, so the meter scales to this wearable
+         rather than to a guess. The threshold sits only ~30 mV above baseline
+         while a real touch runs 800 mV above it, so any fixed span either
+         pins at full or buries the threshold at the very bottom. */
+      this.lo = this.lo === undefined ? this.mv : Math.min(this.lo, this.mv);
+      this.hi = this.hi === undefined ? this.mv : Math.max(this.hi, this.mv);
+    } else {
+      return;
+    }
+    render();
+  }
+
+  setState(s) {
+    if (this.state === s) return;
+    const had = this.state !== null;
+    this.state = s;
+    if (had) say(`${this.side}: ${STATES[s] ? STATES[s].label : s}`);
+  }
+
+  async send(cmd) {
+    if (!this.rx) return false;
+    const bytes = new TextEncoder().encode(cmd);
+    try {
+      if (this.rx.writeValueWithoutResponse) await this.rx.writeValueWithoutResponse(bytes);
+      else await this.rx.writeValue(bytes);
+      return true;
+    } catch (err) {
+      say(`${this.side}: could not send ${cmd} — ${err.message}`, true);
+      return false;
+    }
+  }
+
+  paint() {
+    const el = this.el, q = this.q;
+    el.classList.toggle("empty", !this.connected);
+    el.classList.toggle("touching", this.connected && this.key);
+
+    if (!this.connected) {
+      q.ver.textContent = "—";
+      q.dot.className = "dot";
+      q.st.textContent = "Offline";
+      q.fill.style.width = "0";
+      q.mark.hidden = true;
+      q.mvEl.textContent = "— mV";
+      q.thr.textContent = "threshold —";
+      return;
+    }
+
+    const s = this.state !== null ? STATES[this.state] : null;
+    q.dot.className = "dot" + (s ? " " + s.cls : "");
+    q.st.textContent = s ? s.label : "Connected";
+
+    q.ver.textContent = this.state !== 2 ? "…"
+                      : this.key ? "Touch!" : "no touch";
+
+    q.mvEl.innerHTML = this.mv === null ? "— mV" : `<b>${this.mv}</b> mV`;
+    q.thr.innerHTML = !this.onThr ? "threshold —"
+      : this.weak ? `<span class="weak">threshold ${this.onThr} · too tight</span>`
+      : `threshold ${this.onThr}`;
+
+    /* Scale the meter around the calibrated window so the threshold sits in a
+       readable place, instead of against the ADC's full 0-3600 mV range where
+       every touch would be a sliver. */
+    if (this.mv !== null && this.onThr) {
+      /* Span the observed range, always wide enough to show the threshold
+         clear of the floor even before the first touch has been seen. */
+      let lo = Math.min(this.lo, this.base || this.onThr);
+      let hi = Math.max(this.hi, this.onThr + (this.onThr - lo) * 2);
+      const pad = Math.max(10, (hi - lo) * 0.08);
+      lo -= pad; hi += pad;
+      const pct = v => Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100));
+      q.fill.style.width = pct(this.mv) + "%";
+      q.mark.hidden = false;
+      q.mark.style.left = pct(this.onThr) + "%";
+    } else {
+      q.fill.style.width = "0";
+      q.mark.hidden = true;
+    }
+  }
+}
+
+const left  = new Unit("Left",  document.getElementById("unitL"));
+const right = new Unit("Right", document.getElementById("unitR"));
+const units = [left, right];
+
+const btnConnect = document.getElementById("btnConnect");
+const btnTest    = document.getElementById("btnTest");
+const btnRecal   = document.getElementById("btnRecal");
+
+const stepsPanel = document.getElementById("steps");
+const stageSay   = document.getElementById("stageSay");
+const stageSub   = document.getElementById("stageSub");
+const countWrap  = document.getElementById("countWrap");
+const countNum   = document.getElementById("countNum");
+const countFill  = document.getElementById("countFill");
+
+/* The firmware collects SETUP_WINDOW = 562 samples. The loop's real period
+   measured 8.95 ms across every capture, not the nominal 8 ms, so the window
+   runs ~5.03 s rather than 4.50 s. Counting down the nominal figure would say
+   "done" while the board is still collecting, and the player would stop moving
+   for the last half second - filling the tail of the window with no-contact
+   samples only. */
+const CAL_SECONDS = 562 * 8.95 / 1000;
+
+let stepsHideTimer = null, tick = null, collectStart = null;
+
+function showSteps(on) {
+  stepsPanel.hidden = !on;
+  if (stepsHideTimer) { clearTimeout(stepsHideTimer); stepsHideTimer = null; }
+  if (!on) { stopTick(); collectStart = null; }
+}
+
+function startTick() { if (!tick) tick = setInterval(paintSteps, 100); }
+function stopTick()  { if (tick) { clearInterval(tick); tick = null; } }
+
+/* The slowest unit drives the display. Both wearables calibrate from the same
+   motion, so the instruction must stay up until the last one has finished. */
+function paintSteps() {
+  if (stepsPanel.hidden) return;
+  const live = units.filter(u => u.connected);
+  if (!live.length) return;
+
+  const stage = Math.min(...live.map(u => (u.state === null ? 0 : u.state)));
+  stepsPanel.classList.toggle("ready", stage === 0);
+  stepsPanel.classList.toggle("go",    stage === 1);
+  stepsPanel.classList.toggle("done",  stage === 2);
+
+  if (stage === 0) {
+    stopTick(); collectStart = null;
+    countWrap.hidden = true;
+    stageSay.textContent = "Calibration is ready — start the motion now.";
+    stageSub.textContent = "Repeat contact and no-contact as if you were playing. "
+      + "The first contact starts the measurement.";
+    return;
+  }
+
+  if (stage === 1) {
+    if (collectStart === null) { collectStart = Date.now(); startTick(); }
+    const left = Math.max(0, CAL_SECONDS - (Date.now() - collectStart) / 1000);
+    countWrap.hidden = false;
+    countFill.style.width = (left / CAL_SECONDS * 100) + "%";
+
+    if (left > 0.05) {
+      /* Clamped to 5: the window is 5.03 s, so an unclamped ceiling would
+         flash "6" for 30 ms before settling. */
+      countNum.textContent = String(Math.min(5, Math.ceil(left)));
+      stageSay.textContent = "Keep going — contact, release, contact, release.";
+      stageSub.textContent = "Don't hold still: the threshold needs both states.";
+    } else {
+      /* Timer expired but the board has not confirmed. Never say "done" on a
+         guess - the player must keep moving until the device says so. */
+      countNum.textContent = "·";
+      stageSay.textContent = "Almost — keep the motion going.";
+      stageSub.textContent = "Waiting for the wearable to confirm.";
+    }
+    return;
+  }
+
+  stopTick(); collectStart = null;
+  countWrap.hidden = true;
+  const thr = live.map(u => `${u.side} ${u.onThr} mV`).join(" · ");
+  const bad = live.filter(u => u.weak);
+  stageSay.textContent = "Done — calibration complete. You can play.";
+  stageSub.textContent = bad.length
+    ? `${bad.map(u => u.side).join(" and ")} came out too tight. Recalibrate, `
+      + `and keep repeating the motion for the whole countdown.`
+    : `Threshold set: ${thr}`;
+  if (!stepsHideTimer && !bad.length) {
+    stepsHideTimer = setTimeout(() => showSteps(false), 9000);
+  }
+}
+
+function render() {
+  units.forEach(u => u.paint());
+  paintSteps();
+  const live = units.filter(u => u.connected).length;
+  btnTest.disabled = btnRecal.disabled = live === 0;
+  btnRecal.textContent = live === 2 ? "Recalibrate both" : "Recalibrate";
+  btnConnect.textContent = live === 0 ? "Connect wearables"
+                         : live === 1 ? "Add the second wearable"
+                         : "Both wearables connected";
+  btnConnect.disabled = live === 2;
+}
+
+/* Read the side a connected board reports, without filing it anywhere. The
+   reply carries DEVICE_SIDE as compiled in - the same flag that decides
+   whether it sends keycode A or D - so it cannot disagree with the game. */
+function askSide(tx, rx) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("no reply to TEST — is this firmware up to date?")), 4000);
+    const onFirst = e => {
+      const v = e.target.value;
+      if (v.byteLength === 8 && v.getUint8(4) === TAG_TEST) {
+        clearTimeout(timer);
+        tx.removeEventListener("characteristicvaluechanged", onFirst);
+        resolve(v.getUint8(5) === 1 ? "Right" : "Left");
+      }
+    };
+    tx.addEventListener("characteristicvaluechanged", onFirst);
+    tx.startNotifications()
+      .then(() => rx.writeValueWithoutResponse
+        ? rx.writeValueWithoutResponse(new TextEncoder().encode("TEST"))
+        : rx.writeValue(new TextEncoder().encode("TEST")))
+      .catch(reject);
+  });
+}
+
+/* Bring one already-chosen device up and file it under the side it reports. */
+async function attachDevice(device) {
+  if (units.some(u => u.device && u.device.id === device.id)) return false;
+
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(NUS);
+  const rx = await svc.getCharacteristic(NUS_RX);
+  const tx = await svc.getCharacteristic(NUS_TX);
+
+  const side = await askSide(tx, rx);
+  const unit = units.find(u => u.side === side);
+  if (unit.connected) {
+    say(`Another ${side.toLowerCase()} wearable is already connected.`, true);
+    device.gatt.disconnect();
+    return false;
+  }
+
+  unit.attach(device, rx);
+  tx.addEventListener("characteristicvaluechanged", e => unit.onPacket(e.target.value));
+  device.addEventListener("gattserverdisconnected", () => unit.drop());
+  say(`<b>${side}: connected to ${device.name || "wearable"}</b>`);
+  await unit.send("TEST");
+  return true;
+}
+
+const missing = () => units.filter(u => !u.connected).length;
+
+/* ---------------- one-time registration ---------------- */
+
+/* Which sides this browser has already granted. Inferred from the names
+   getDevices() returns, which is enough to tick the setup list; the
+   authoritative check is still the board's own TEST reply at connect time. */
+async function registeredSides() {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return [];
+  try {
+    const known = await navigator.bluetooth.getDevices();
+    return known.map(d => /\bleft\b/i.test(d.name || "") ? "Left"
+                        : /\bright\b/i.test(d.name || "") ? "Right" : null)
+                .filter(Boolean);
+  } catch (e) { return []; }
+}
+
+async function paintSetup() {
+  const have = await registeredSides();
+  document.querySelectorAll("[data-regstate]").forEach(el => {
+    const ok = have.includes(el.dataset.regstate);
+    el.textContent = ok ? "registered ✓" : "not registered";
+    el.classList.toggle("ok", ok);
+  });
+  document.querySelectorAll("[data-regbtn]").forEach(b => {
+    const ok = have.includes(b.dataset.regbtn);
+    b.textContent = ok ? `Re-register ${b.dataset.regbtn.toLowerCase()}`
+                       : `Register ${b.dataset.regbtn.toLowerCase()}`;
+  });
+  /* Open the setup section by itself when nothing is registered yet, so a
+     fresh iPad lands on the step it actually needs. */
+  if (!have.length) document.getElementById("setup").open = true;
+}
+
+async function registerSide(want, btn) {
+  if (!navigator.bluetooth) {
+    say("This browser has no Web Bluetooth. On iPad, open this page in Bluefy.", true);
+    return;
+  }
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = "Choose it…";
+  let device = null;
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "Circle" }],
+      optionalServices: [NUS],
+    });
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    const rx = await svc.getCharacteristic(NUS_RX);
+    const tx = await svc.getCharacteristic(NUS_TX);
+    const got = await askSide(tx, rx);
+
+    if (got !== want) {
+      say(`That is the <b>${got.toLowerCase()}</b> wearable, not the ` +
+          `${want.toLowerCase()} one. Nothing was registered — ` +
+          `use the "Register ${got.toLowerCase()}" button for it.`, true);
+      device.gatt.disconnect();
+      return;
+    }
+
+    say(`<b>${want} registered</b> (${device.name || "wearable"}). ` +
+        `This iPad will reconnect it automatically from now on.`);
+    /* Leave it connected: the grant is done and the unit is live, so the
+       player can go straight to Test. */
+    if (!(await attachDevice(device))) device.gatt.disconnect();
+  } catch (err) {
+    const m = String((err && err.message) || err);
+    if (device && device.gatt && device.gatt.connected) device.gatt.disconnect();
+    say(/cancel|User cancelled/i.test(m) ? "Registration cancelled." : m,
+        !/cancel|User cancelled/i.test(m));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+    paintSetup();
+    render();
+  }
+}
+
+document.querySelectorAll("[data-regbtn]").forEach(b =>
+  b.addEventListener("click", () => registerSide(b.dataset.regbtn, b)));
+
+/* One tap should bring up both wearables. Two things stand in the way, and
+   each has a different answer:
+
+   getDevices() returns wearables this page has already been granted, with no
+   chooser and without needing them to be advertising - so from the second
+   visit onward a single tap connects both.
+
+   requestDevice() opens a chooser, returns exactly one device, and consumes
+   the tap's user activation. A second call in the same handler throws. So the
+   first ever visit needs one tap per wearable; there is no API that avoids
+   this. */
+btnConnect.addEventListener("click", async () => {
+  if (!navigator.bluetooth) {
+    say("This browser has no Web Bluetooth. On iPad, open this page in Bluefy.", true);
+    return;
+  }
+  btnConnect.disabled = true;
+  btnConnect.textContent = "Connecting…";
+
+  try {
+    /* 1. Anything already permitted - silent, no chooser. */
+    if (navigator.bluetooth.getDevices) {
+      let known = [];
+      try { known = await navigator.bluetooth.getDevices(); } catch (e) { /* unsupported */ }
+      const ours = known.filter(d => (d.name || "").startsWith("Circle"));
+      if (ours.length) say(`Reconnecting ${ours.length} remembered wearable(s)…`);
+      for (const d of ours) {
+        if (!missing()) break;
+        try { await attachDevice(d); }
+        catch (err) { say(`${d.name || "wearable"}: ${err.message}`, true); }
+      }
+    }
+
+    /* 2. Chooser for whatever is still missing, one tap each. */
+    while (missing()) {
+      let device = null;
+      try {
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: "Circle" }],
+          optionalServices: [NUS],
+        });
+        await attachDevice(device);
+      } catch (err) {
+        const m = String((err && err.message) || err);
+        if (device && device.gatt && device.gatt.connected) device.gatt.disconnect();
+        if (/cancel|User cancelled/i.test(m)) { say("Device chooser dismissed."); break; }
+        /* Activation is spent after the first chooser - ask for another tap
+           rather than failing with a browser error the player cannot act on. */
+        if (/gesture|activation/i.test(m)) {
+          say("Tap once more to add the second wearable.");
+          break;
+        }
+        say(m, true);
+        break;
+      }
+    }
+  } finally {
+    render();
+  }
+});
+
+btnTest.addEventListener("click", async () => {
+  showSteps(false);
+  say("<b>Test</b> — fist bump now; both should read Touch!");
+  for (const u of units) if (u.connected) await u.send("TEST");
+});
+
+btnRecal.addEventListener("click", async () => {
+  const live = units.filter(u => u.connected);
+  say(`<b>Recalibrate</b> ${live.map(u => u.side).join(" and ")}`);
+  for (const u of live) {
+    u.state = null; u.onThr = null; u.lo = undefined; u.hi = undefined;
+    await u.send("RECAL");
+  }
+  showSteps(true);
+  stepsPanel.classList.remove("go", "done");
+  stageSay.textContent = "Starting…";
+  stageSub.textContent = "";
+  countWrap.hidden = true;
+  render();
+});
+
+document.getElementById("support").textContent = navigator.bluetooth
+  ? "Keep this page open while recalibrating. Closing it drops the control link; "
+    + "the keyboard connection used for gameplay is unaffected."
+  : "This browser cannot use Bluetooth. Safari and Chrome on iPad do not support "
+    + "Web Bluetooth — open this page in the Bluefy browser instead.";
+
+render();
+
+/* On load, silently bring back any wearable this page has been granted
+   before. getDevices() needs neither a user gesture nor a chooser, so a
+   returning player opens the page and both units are simply there. */
+(async function restore() {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return;
+  let known = [];
+  try { known = await navigator.bluetooth.getDevices(); } catch (e) { return; }
+  const ours = known.filter(d => (d.name || "").startsWith("Circle"));
+  if (!ours.length) return;
+  say(`Found ${ours.length} remembered wearable(s) — reconnecting…`);
+  for (const d of ours) {
+    try { await attachDevice(d); }
+    catch (err) { say(`${d.name || "wearable"}: ${err.message}`, true); }
+  }
+  render();
+})();
+
+paintSetup();
+</script>
