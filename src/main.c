@@ -169,12 +169,95 @@ static int32_t raw_adc_to_mv(int16_t raw)
            ADC_MAX_COUNTS;
 }
 
+/* 8-byte reply to TEST. Distinct length from the 6/13/18-byte packets, which
+ * is how the host tells the four packet types apart.
+ *   [0..3] uint32 uptime_ms
+ *   [4]    0x54 'T'
+ *   [5]    side: 0 = left, 1 = right
+ *   [6]    1 while the touch key is pressed
+ *   [7]    detector state: 0 waiting, 1 calibrating, 2 ready
+ */
+#define NUS_TAG_TEST  0x54
+
+static uint8_t detector_state_code(void)
+{
+    if (hog_threshold_is_locked()) {
+        return 2U;
+    }
+    if (hog_is_collecting_calibration()) {
+        return 1U;
+    }
+    return 0U;
+}
+
+static void nus_send_test_reply(void)
+{
+    if (!nus_ready || current_conn == NULL) {
+        return;
+    }
+
+    uint8_t pkt[8];
+
+    sys_put_le32((uint32_t)k_uptime_get(), &pkt[0]);
+    pkt[4] = NUS_TAG_TEST;
+    pkt[5] = is_right_board ? 1U : 0U;
+    pkt[6] = hog_key_is_pressed() ? 1U : 0U;
+    pkt[7] = detector_state_code();
+
+    (void)bt_nus_send(current_conn, pkt, sizeof(pkt));
+}
+
+/* Commands from the host, as plain text so they can also be typed into the
+ * nRF Connect app's UART console while debugging:
+ *
+ *   RECAL  restart calibration without dropping the HID link
+ *   TEST   reply with side / key / detector state
+ */
 static void nus_received(struct bt_conn *conn,
                          const uint8_t *const data, uint16_t len)
 {
     ARG_UNUSED(conn);
 
-    printk("NUS rx (%u bytes): %.*s\n", len, (int)len, (const char *)data);
+    char cmd[16];
+    uint16_t n = 0;
+
+    /* Copy out the printable prefix, upper-cased, stopping at CR/LF so a
+     * terminal that appends a newline still matches.
+     */
+    for (uint16_t i = 0; i < len && n < (sizeof(cmd) - 1U); i++) {
+        char c = (char)data[i];
+
+        if (c == '\r' || c == '\n') {
+            break;
+        }
+        if (c >= 'a' && c <= 'z') {
+            c = (char)(c - 'a' + 'A');
+        }
+        cmd[n++] = c;
+    }
+    cmd[n] = '\0';
+
+    if (strcmp(cmd, "RECAL") == 0) {
+        printk("NUS cmd: RECAL - restarting calibration\n");
+
+        hog_force_recalibrate();
+
+        /* Force the main loop to re-announce, so the host sees the state
+         * fall back to 0 rather than keeping the stale 2.
+         */
+        nus_last_state = 0xFFU;
+
+        nus_send_test_reply();
+        return;
+    }
+
+    if (strcmp(cmd, "TEST") == 0) {
+        printk("NUS cmd: TEST\n");
+        nus_send_test_reply();
+        return;
+    }
+
+    printk("NUS rx (%u bytes), unknown command: %s\n", len, cmd);
 }
 
 static void nus_send_enabled(enum bt_nus_send_status status)

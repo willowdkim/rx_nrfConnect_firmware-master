@@ -607,6 +607,30 @@ void hog_disconnected(void)
 	hog_reset_detector();
 }
 
+void hog_force_recalibrate(void)
+{
+	/* Release a held key first. Resetting the detector alone would clear
+	 * key_is_pressed without telling the host, leaving the game device
+	 * with a key stuck down forever.
+	 */
+	if (key_is_pressed) {
+		uint8_t keycode = is_right_board ? HID_KEY_D : HID_KEY_A;
+
+		send_keyboard_report(keycode, false);
+		nus_send_key_event(false);
+	}
+
+	/* Note: notifications_enabled is deliberately NOT cleared. The HID
+	 * link to the game device stays up; only the detector restarts.
+	 */
+	hog_reset_detector();
+}
+
+bool hog_key_is_pressed(void)
+{
+	return key_is_pressed;
+}
+
 void hog_button_loop(void)
 {
 	int32_t voltage_mv;
